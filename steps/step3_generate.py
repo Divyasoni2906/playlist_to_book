@@ -27,7 +27,7 @@ from config import (
     GEMINI_API_KEY, GEMINI_MODEL, GEMINI_DELAY_SEC,
 )
 
-MAX_CHARS = 120_000
+MAX_CHARS = 90_000
 
 
 def build_transcript_block(paragraphs, video_url):

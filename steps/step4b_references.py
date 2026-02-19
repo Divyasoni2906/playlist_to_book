@@ -1,48 +1,134 @@
 """
-steps/step4b_references.py — Extract key technical claims and match to external references.
+steps/step4b_references.py — Extract references using Groq (llama-3.1-8b-instant).
 
-Asks Gemini to identify any papers, concepts, or claims in the chapters
-that correspond to known published work, and outputs a references appendix.
+Uses a small fast model -- reference extraction doesn't need 120B parameters.
+Chunking: paragraph-based, never cuts mid-sentence.
+Deduplication: groups by normalized paper title, merges concepts.
 
-Output: data/book/references.md  (appended to book.md by step4_assemble)
+Install: pip install groq
+Add to .env: GROQ_API_KEY=...
 """
 
-import json
+import os
+import re
 import sys
 import time
+from collections import defaultdict
 from pathlib import Path
 
+from groq import Groq
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from config import CHAPTERS_DIR, BOOK_DIR, GEMINI_API_KEY, GEMINI_MODEL, GEMINI_DELAY_SEC
+from config import CHAPTERS_DIR, BOOK_DIR, GROQ_API_KEY, LLM_DELAY_SEC
 
-REFERENCE_PROMPT = """
-You are a technical editor reviewing a book chapter about building LLMs.
+# Small model for reference extraction -- low token usage, stays within free limits
+GROQ_REF_MODEL = "llama-3.1-8b-instant"
+MAX_CHARS      = 30_000
 
-Your task: identify every concept, technique, or claim in this chapter that
-corresponds to a known published paper or foundational work.
+REFERENCE_PROMPT = """You are a technical editor reviewing a section of a book chapter about building LLMs.
 
-For each one, output a reference entry in this format:
-- **[ConceptName]** — Brief description of what it is. Source: *Paper Title* (Author(s), Year). https://arxiv.org/abs/...
+Identify every concept or technique that corresponds to a known published paper.
+
+Output each reference in EXACTLY this format (one per line, nothing else):
+CONCEPT: ConceptName | PAPER: Paper Title | AUTHORS: Author(s) | YEAR: Year | URL: https://arxiv.org/abs/...
 
 Rules:
-- Only list references you are highly confident about (well-known papers)
+- Only list references you are highly confident about
 - Do NOT invent paper titles, authors, or URLs
-- If you are not sure of the exact paper, write: Source: *[Could not verify — refer to original video]*
-- Focus on: Transformer architecture, attention mechanism, tokenization methods,
-  training techniques, specific model architectures (GPT, BERT etc.), loss functions,
-  optimizers, and any named algorithms
+- If unsure of the URL, write URL: unknown
+- Focus on: Transformer architecture, attention mechanism, tokenization, training techniques,
+  model architectures (GPT, BERT etc.), loss functions, optimizers, named algorithms
+- If no references found, output nothing
 
-Chapter content:
+Text to scan:
 """
+
+
+def chunk_by_paragraphs(text, max_chars):
+    """Split at paragraph boundaries -- never mid-sentence."""
+    paragraphs = text.split("\n\n")
+    chunks  = []
+    current = []
+    cur_len = 0
+    for para in paragraphs:
+        para_len = len(para)
+        if cur_len + para_len > max_chars and current:
+            chunks.append("\n\n".join(current))
+            current = [para]
+            cur_len = para_len
+        else:
+            current.append(para)
+            cur_len += para_len
+    if current:
+        chunks.append("\n\n".join(current))
+    return chunks
+
+
+def call_groq(client, chunk):
+    response = client.chat.completions.create(
+        model=GROQ_REF_MODEL,
+        messages=[{"role": "user", "content": REFERENCE_PROMPT + chunk}],
+        temperature=0.0,
+        max_tokens=1024,
+    )
+    return response.choices[0].message.content.strip()
+
+
+def parse_line(line):
+    try:
+        parts = {}
+        for segment in line.split(" | "):
+            if ":" in segment:
+                k, v = segment.split(":", 1)
+                parts[k.strip()] = v.strip()
+        if "CONCEPT" in parts and "PAPER" in parts:
+            return {
+                "concept": parts.get("CONCEPT", "").strip(),
+                "paper":   parts.get("PAPER", "").strip(),
+                "authors": parts.get("AUTHORS", "").strip(),
+                "year":    parts.get("YEAR", "").strip(),
+                "url":     parts.get("URL", "unknown").strip(),
+            }
+    except Exception:
+        pass
+    return None
+
+
+def normalize(title):
+    title = title.lower().strip()
+    title = re.sub(r'[^a-z0-9\s]', '', title)
+    return re.sub(r'\s+', ' ', title)
+
+
+def deduplicate(raw_refs):
+    groups = defaultdict(lambda: {
+        "concepts": set(), "paper": "", "authors": "", "year": "", "url": "unknown"
+    })
+    for ref in raw_refs:
+        key = normalize(ref["paper"])
+        if not key:
+            continue
+        g = groups[key]
+        if len(ref["paper"]) > len(g["paper"]):
+            g["paper"] = ref["paper"]
+        if not g["authors"] and ref["authors"]:
+            g["authors"] = ref["authors"]
+        if not g["year"] and ref["year"]:
+            g["year"] = ref["year"]
+        if ref["url"] and ref["url"] != "unknown" and g["url"] == "unknown":
+            g["url"] = ref["url"]
+        if ref["concept"]:
+            g["concepts"].add(ref["concept"])
+    return groups
 
 
 def run():
     print("\n" + "="*60)
-    print("STEP 4b: Extract References Appendix")
+    print("STEP 4b: Extract & Deduplicate References (Groq)")
     print("="*60)
 
-    if not GEMINI_API_KEY:
-        print("ERROR: GEMINI_API_KEY not set.")
+    if not GROQ_API_KEY:
+        print("ERROR: GROQ_API_KEY not set.")
         sys.exit(1)
 
     chapter_files = sorted(CHAPTERS_DIR.glob("*.md"))
@@ -50,57 +136,71 @@ def run():
         print("ERROR: No chapters found. Run Step 3 first.")
         sys.exit(1)
 
-    from google import genai
-    from google.genai import types
-    client = genai.Client(api_key=GEMINI_API_KEY)
+    print(f"\nModel  : {GROQ_REF_MODEL}")
+    print(f"Chunks : paragraph-based, max {MAX_CHARS} chars each\n")
 
-    all_references = set()
+    client   = Groq(api_key=GROQ_API_KEY)
+    raw_refs = []
+    total_chunks = 0
 
     for ch_file in chapter_files:
-        print(f"  Scanning {ch_file.name}...")
         with open(ch_file, encoding="utf-8") as f:
             content = f.read()
 
-        # Only send first 40k chars to keep it fast
-        excerpt = content[:40_000]
+        chunks = chunk_by_paragraphs(content, MAX_CHARS)
+        total_chunks += len(chunks)
+        print(f"  {ch_file.name} -- {len(chunks)} chunk(s)")
 
-        try:
-            response = client.models.generate_content(
-                model=GEMINI_MODEL,
-                contents=REFERENCE_PROMPT + excerpt,
-                config=types.GenerateContentConfig(
-                    temperature=0.0,
-                    max_output_tokens=2048,
-                ),
-            )
-            refs = response.text.strip()
-            if refs:
-                for line in refs.splitlines():
+        for i, chunk in enumerate(chunks, 1):
+            try:
+                text = call_groq(client, chunk)
+                for line in text.splitlines():
                     line = line.strip()
-                    if line.startswith("- ") and "**" in line:
-                        all_references.add(line)
-            time.sleep(GEMINI_DELAY_SEC)
+                    if line.startswith("CONCEPT:"):
+                        ref = parse_line(line)
+                        if ref:
+                            raw_refs.append(ref)
+                time.sleep(LLM_DELAY_SEC)
+            except Exception as exc:
+                print(f"    Warning chunk {i}: {exc}")
+                time.sleep(20)   # brief pause on error before continuing
+                continue
 
-        except Exception as exc:
-            print(f"  Warning: {exc}")
-            continue
+    print(f"\n  Chunks scanned  : {total_chunks}")
+    print(f"  Raw refs found  : {len(raw_refs)}")
 
-    # Write references appendix
+    groups = deduplicate(raw_refs)
+    print(f"  Unique papers   : {len(groups)}")
+
     out_path = BOOK_DIR / "references.md"
     with open(out_path, "w", encoding="utf-8") as f:
         f.write("## Appendix: References and Further Reading\n\n")
-        f.write("> *References identified from chapter content. ")
-        f.write("Entries marked [Could not verify] should be confirmed against the source video.*\n\n")
-        if all_references:
-            for ref in sorted(all_references):
-                f.write(ref + "\n")
-        else:
-            f.write("*No references could be automatically identified.*\n")
+        f.write(
+            "> *References automatically identified from chapter content. "
+            "Grouped and deduplicated by paper. "
+            "Entries marked `URL: unknown` could not be automatically verified.*\n\n"
+        )
 
-    print(f"\nStep 4b done -- {len(all_references)} references found.")
-    print(f"Output: {out_path}")
-    print("\nNow re-run Step 4 to include references in book.md:")
-    print("  python pipeline.py --steps 4,5")
+        sorted_papers = sorted(
+            groups.items(),
+            key=lambda x: (x[1]["url"] == "unknown", x[1].get("year", "9999"), x[1].get("paper", ""))
+        )
+
+        for _, g in sorted_papers:
+            concepts    = sorted(g["concepts"])
+            concept_str = ", ".join(f"**{c}**" for c in concepts) if concepts else "**General reference**"
+            citation    = f"*{g['paper']}*"
+            if g["authors"]:
+                citation += f" -- {g['authors']}"
+            if g["year"]:
+                citation += f" ({g['year']})"
+            if g["url"] and g["url"] != "unknown":
+                f.write(f"- {concept_str}\n  {citation}. [{g['url']}]({g['url']})\n\n")
+            else:
+                f.write(f"- {concept_str}\n  {citation}.\n\n")
+
+    print(f"\nStep 4b done. Output: {out_path}")
+    print("Now run: python pipeline.py --steps 4,5")
 
 
 if __name__ == "__main__":

@@ -15,7 +15,10 @@ load_dotenv()
 PLAYLIST_URL = "https://www.youtube.com/playlist?list=PLPTV0NXA_ZSgsLAr8YCgCwhPIJNNtexWu"
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-GEMINI_MODEL   = "gemini-2.5-flash-lite"
+GEMINI_MODEL   = "gemini-2.5-flash"
+
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GROQ_MODEL   = "openai/gpt-oss-120b"
 
 BOOK_TITLE    = "Building LLMs from Scratch"
 BOOK_SUBTITLE = "A Practical Guide from First Principles"
@@ -36,8 +39,8 @@ CHAPTERS_DIR = DATA_DIR / "chapters"   # generated .md chapters
 BOOK_DIR     = DATA_DIR / "book"       # final book.md + book.pdf
 PROMPTS_DIR  = ROOT / "prompts"
 
-# Gemini rate limit safety (free tier = 15 req/min)
-GEMINI_DELAY_SEC = 5
-
+# Gemini rate limit safety
+GEMINI_DELAY_SEC = 30
+LLM_DELAY_SEC = 60  
 for _d in [RAW_DIR, CLEAN_DIR, CHAPTERS_DIR, BOOK_DIR, PROMPTS_DIR]:
     _d.mkdir(parents=True, exist_ok=True)

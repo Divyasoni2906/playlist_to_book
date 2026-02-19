@@ -15,7 +15,7 @@ load_dotenv()
 PLAYLIST_URL = "https://www.youtube.com/playlist?list=PLPTV0NXA_ZSgsLAr8YCgCwhPIJNNtexWu"
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-GEMINI_MODEL   = "gemini-2.5-flash"
+GEMINI_MODEL   = "gemini-2.5-flash-lite"
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GROQ_MODEL   = "openai/gpt-oss-120b"

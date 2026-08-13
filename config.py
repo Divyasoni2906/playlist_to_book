@@ -10,6 +10,8 @@ load_dotenv()
 
 # ================================================================
 # USER SETTINGS
+# SET THIS BEFORE EACH RUN — used as the book's title page and PDF metadata.
+# Defaults below are just placeholders from the original test playlist.
 # ================================================================
 
 PLAYLIST_URL = "https://www.youtube.com/playlist?list=PLPTV0NXA_ZSgsLAr8YCgCwhPIJNNtexWu"
@@ -22,6 +24,7 @@ GEMINI_MODEL_FALLBACK= "gemini-2.5-flash"         # 5 RPM, 20 RPD -- separate qu
 # Step 4b: Reference extraction -- Groq only
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GROQ_MODEL   = "llama-3.1-8b-instant"
+
 
 BOOK_TITLE    = "Building LLMs from Scratch"
 BOOK_SUBTITLE = "A Practical Guide from First Principles"
